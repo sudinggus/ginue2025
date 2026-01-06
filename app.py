@@ -8,21 +8,20 @@ from openpyxl.styles import Alignment, Border, Side, PatternFill, Font
 from collections import defaultdict
 
 # ==========================================
-# 1. 초기 설정 및 페이지 레이아웃
+# 1. 페이지 설정 및 디자인
 # ==========================================
 st.set_page_config(page_title="근무표 자동화 시스템", layout="wide")
 
-# CSS: 표 디자인 및 가독성 향상
 st.markdown("""
     <style>
-        .stTable { border: 1px solid #333; }
-        th { background-color: #f2f2f2 !important; color: black !important; text-align: center !important; }
-        td { text-align: center !important; }
-        .stButton>button { width: 100%; border-radius: 5px; }
+        .stTable { border: 1px solid #333; font-size: 14px; }
+        th { background-color: #F2F2F2 !important; color: black !important; font-weight: bold !important; text-align: center !important; border: 1px solid #333 !important; }
+        td { border: 1px solid #333 !important; text-align: center !important; }
+        .stButton>button { width: 100%; }
     </style>
 """, unsafe_allow_html=True)
 
-# 상수 설정
+# 설정값
 LOCATIONS_CONFIG = {
     "인천": {"생활관1": 2, "생활관2": 2, "생활관3": 2, "상황실1": 3, "도서관1": 2},
     "경기": {"생활관1": 2, "생활관2": 2, "상황실2": 3, "도서관2": 2}
@@ -30,19 +29,17 @@ LOCATIONS_CONFIG = {
 HOLIDAYS = ['2025-10-03', '2025-10-06', '2025-10-09']
 
 # ==========================================
-# 2. 핵심 로직 엔진 (코랩 코드 이식)
+# 2. 핵심 로직 (코랩 배정 엔진)
 # ==========================================
 
 def get_korean_weekday(date_obj):
     return ['월', '화', '수', '목', '금', '토', '일'][date_obj.weekday()]
 
 def generate_schedule_logic(df_staff, start_dt, end_dt):
-    """코랩에서 사용하던 배정 알고리즘"""
     df_staff['이름'] = df_staff['이름'].astype(str).str.strip()
     work_counts = {name: 0 for name in df_staff['이름'].unique()}
     schedule_results = []
     
-    # [생략되지 않은 전체 로직 구현부]
     fixed_assignments = defaultdict(list)
     for _, row in df_staff.iterrows():
         if pd.notna(row.get('고정근무일자')):
@@ -94,108 +91,113 @@ def generate_schedule_logic(df_staff, start_dt, end_dt):
 
     return pd.DataFrame(schedule_results), work_counts
 
+# ==========================================
+# 3. 엑셀 생성 (코랩 스타일 복원)
+# ==========================================
+
 def make_final_excel_blob(df, stats):
-    """코랩에서 사용하던 엑셀 시각화 및 멀티 시트 생성"""
     output = BytesIO()
     wb = Workbook()
     side = Side(style='thin')
     border = Border(left=side, right=side, top=side, bottom=side)
     center = Alignment(horizontal='center', vertical='center', wrap_text=True)
     header_fill = PatternFill(start_color="F2F2F2", end_color="F2F2F2", fill_type="solid")
-
-    # 시트 1: 원본 데이터
-    ws_raw = wb.active
-    ws_raw.title = "Schedule"
-    headers = ["날짜", "캠퍼스", "근무지", "직원", "유형"]
-    ws_raw.append(headers)
-    for _, row in df.iterrows():
-        ws_raw.append(row.tolist())
+    
+    # 시트 1: 주간근무표 (시각화 시트)
+    ws1 = wb.active
+    ws1.title = "주간근무표"
+    dates = sorted(df['날짜'].unique())
+    curr_r = 1
+    
+    for d_str in dates:
+        dt_obj = datetime.strptime(d_str, '%Y-%m-%d')
+        ws1.merge_cells(start_row=curr_r, start_column=1, end_row=curr_r, end_column=6)
+        cell = ws1.cell(row=curr_r, column=1, value=f"{d_str}({get_korean_weekday(dt_obj)}) 근무표")
+        cell.alignment = center; cell.fill = header_fill; cell.font = Font(bold=True)
+        curr_r += 1
+        
+        headers = ["캠퍼스", "도서관", "상황실", "생활관1", "생활관2", "생활관3"]
+        for c_idx, h in enumerate(headers, 1):
+            cell = ws1.cell(row=curr_r, column=c_idx, value=h)
+            cell.alignment = center; cell.border = border; cell.fill = header_fill
+        curr_r += 1
+        
+        for cp in ["인천", "경기"]:
+            ws1.cell(row=curr_r, column=1, value=cp).border = border
+            for c_idx, loc_b in enumerate(["도서관", "상황실", "생활관1", "생활관2", "생활관3"], 2):
+                loc_f = loc_b + ("1" if cp=="인천" and "생활관" not in loc_b else ("2" if cp=="경기" and "생활관" not in loc_b else ""))
+                names = df[(df['날짜']==d_str) & (df['캠퍼스']==cp) & (df['근무지']==loc_f)]['직원'].tolist()
+                ws1.cell(row=curr_r, column=c_idx, value=", ".join(names)).border = border
+                ws1.cell(row=curr_r, column=c_idx).alignment = center
+            curr_r += 1
+        curr_r += 1 # 공백행
 
     # 시트 2: 근무통계
-    ws_stat = wb.create_sheet("근무통계")
-    ws_stat.append(["직원 이름", "횟수"])
-    for name, count in stats.items():
-        ws_stat.append([name, count])
+    ws2 = wb.create_sheet("근무통계")
+    ws2.append(["직원 이름", "총 근무 횟수"])
+    for name, count in sorted(stats.items(), key=lambda x: x[1], reverse=True):
+        ws2.append([name, count])
 
     wb.save(output)
     return output.getvalue()
 
 # ==========================================
-# 3. 세션 관리 및 UI 구성
+# 4. Streamlit UI (게시판 및 관리)
 # ==========================================
 
-if 'df' not in st.session_state:
-    st.session_state.df = None
-if 'stats' not in st.session_state:
-    st.session_state.stats = {}
+if 'df' not in st.session_state: st.session_state.df = None
+if 'stats' not in st.session_state: st.session_state.stats = {}
 
-# --- 사이드바 (관리자 도구) ---
 with st.sidebar:
-    st.title("🔐 관리자 제어")
-    pw = st.text_input("관리자 암호", type="password")
-    
-    if pw == "1234": # 암호 설정
-        st.success("인증 성공")
-        file = st.file_uploader("명단 파일(xlsx) 업로드", type=['xlsx'])
-        s_date = st.date_input("시작일", datetime.today())
-        e_date = st.date_input("종료일", datetime.today() + timedelta(days=14))
-        
-        if st.button("🚀 근무표 생성 및 게시"):
+    st.title("🔐 관리자 인증")
+    pw = st.text_input("암호를 입력하세요", type="password")
+    if pw == "1234":
+        st.success("인증됨")
+        file = st.file_uploader("명단 업로드", type=['xlsx'])
+        s_d = st.date_input("시작일", datetime.today())
+        e_d = st.date_input("종료일", datetime.today() + timedelta(days=7))
+        if st.button("신규 근무표 생성"):
             if file:
-                input_df = pd.read_excel(file)
-                res_df, res_stats = generate_schedule_logic(input_df, s_date, e_date)
+                in_df = pd.read_excel(file)
+                res_df, res_stats = generate_schedule_logic(in_df, s_d, e_d)
                 st.session_state.df = res_df.reset_index(drop=True)
                 st.session_state.stats = res_stats
                 st.rerun()
-    else:
-        st.info("암호를 입력하면 관리 기능을 사용할 수 있습니다.")
 
-# --- 메인 화면 (직원 게시판) ---
 st.title("📢 실시간 근무 게시판")
 
 if st.session_state.df is not None:
     df = st.session_state.df
     
-    # 상단 도구 (다운로드 및 교체 신청)
-    col1, col2 = st.columns([1, 1])
-    with col1:
-        excel_data = make_final_excel_blob(df, st.session_state.stats)
-        st.download_button("📥 코랩 스타일 엑셀 다운로드", excel_data, 
-                           file_name=f"근무표_{datetime.now().strftime('%m%d')}.xlsx")
+    # 상단 버튼 (엑셀 다운로드)
+    excel_bin = make_final_excel_blob(df, st.session_state.stats)
+    st.download_button(label="📥 코랩 스타일 엑셀 다운로드 (전체 시트 포함)", 
+                       data=excel_bin, file_name="근무표_최종.xlsx")
     
-    with col2:
-        with st.expander("🔄 1:1 교체 신청 (관리자용)"):
-            if pw == "1234":
-                idx1 = st.selectbox("대상자 1", df.index, format_func=lambda x: f"{df.loc[x, '날짜']} {df.loc[x, '직원']}")
-                idx2 = st.selectbox("대상자 2", df.index, format_func=lambda x: f"{df.loc[x, '날짜']} {df.loc[x, '직원']}")
-                if st.button("교체 확정"):
-                    df.at[idx1, '직원'], df.at[idx2, '직원'] = df.at[idx2, '직원'], df.at[idx1, '직원']
-                    st.session_state.df = df
-                    st.success("교체되었습니다!")
-                    st.rerun()
-            else:
-                st.warning("교체 권한이 없습니다.")
+    # 관리자 전용 교체 기능
+    if pw == "1234":
+        with st.expander("🔄 1:1 인원 교체"):
+            c1, c2 = st.columns(2)
+            idx1 = c1.selectbox("첫번째 셀", df.index, format_func=lambda x: f"{df.loc[x,'날짜']} {df.loc[x,'직원']}")
+            idx2 = c2.selectbox("두번째 셀", df.index, format_func=lambda x: f"{df.loc[x,'날짜']} {df.loc[x,'직원']}")
+            if st.button("교체 확정"):
+                df.at[idx1, '직원'], df.at[idx2, '직원'] = df.at[idx2, '직원'], df.at[idx1, '직원']
+                st.session_state.df = df
+                st.rerun()
 
-    # 주간 근무표 시각화 (Pivot Table)
-    st.subheader("🗓️ 주간 근무 현황")
-    try:
-        pivot_view = df.pivot_table(
-            index=['캠퍼스', '근무지'],
-            columns='날짜',
-            values='직원',
-            aggfunc=lambda x: ", ".join(x)
-        ).fillna("-")
-        st.table(pivot_view)
-    except:
-        st.dataframe(df) # 피벗 에러 시 기본 표 출력
-
-    # 본인 검색 기능
+    # 웹 화면 시각화 (코랩 엑셀 시트와 동일한 구조)
     st.divider()
-    search = st.text_input("🔍 내 이름으로 근무 찾기", "")
-    if search:
-        mine = df[df['직원'].str.contains(search)]
-        st.write(f"'{search}'님의 근무 일정:")
-        st.table(mine)
-
+    dates = sorted(df['날짜'].unique())
+    for d_str in dates:
+        st.subheader(f"🗓️ {d_str} ({get_korean_weekday(datetime.strptime(d_str, '%Y-%m-%d'))})")
+        disp = []
+        for cp in ["인천", "경기"]:
+            r = {"캠퍼스": cp}
+            for loc_b in ["도서관", "상황실", "생활관1", "생활관2", "생활관3"]:
+                loc_f = loc_b + ("1" if cp=="인천" and "생활관" not in loc_b else ("2" if cp=="경기" and "생활관" not in loc_b else ""))
+                names = df[(df['날짜']==d_str) & (df['캠퍼스']==cp) & (df['근무지']==loc_f)]['직원'].tolist()
+                r[loc_b] = ", ".join(names)
+            disp.append(r)
+        st.table(pd.DataFrame(disp))
 else:
-    st.warning("현재 게시된 근무표가 없습니다. 관리자가 명단을 업로드해야 합니다.")
+    st.info("관리자 메뉴에서 엑셀 파일을 업로드하여 근무표를 생성해주세요.")
